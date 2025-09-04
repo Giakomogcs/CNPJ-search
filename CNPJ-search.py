@@ -113,26 +113,27 @@ def consultar_cnpj_api(cnpj):
     return None, 'Falha na Consulta'
 
 def processar_linha(linha, cnae_processor):
-    """Processa uma única linha do DataFrame, consultando a API e enriquecendo os dados."""
+    """
+    Processa uma única linha, consulta a API e retorna um dicionário com os dados a serem atualizados.
+    """
     cnpj_original = str(linha.get('cnpj', ''))
     print(f"\nProcessando CNPJ '{cnpj_original}'...")
 
     dados_api, status = consultar_cnpj_api(cnpj_original)
 
-    linha_atualizada = linha.to_dict()
-    linha_atualizada['status_consulta'] = status
+    updates = {}
 
     if dados_api:
-        print("  -> SUCESSO: Dados obtidos da API. Preenchendo colunas...")
+        print("  -> SUCESSO: Dados obtidos da API. Mapeando atualizações...")
 
-        # Mapeamento e preenchimento dos campos da API
-        linha_atualizada.update({
+        # Mapeamento direto da API para as colunas da planilha
+        api_map = {
             'razao_social': dados_api.get('razao_social'),
             'nome_fantasia': dados_api.get('nome_fantasia'),
             'data_inicio_atividade': dados_api.get('data_inicio_atividade'),
             'situacao_cadastral': dados_api.get('descricao_situacao_cadastral'),
             'data_situacao_cadastral': dados_api.get('data_situacao_cadastral'),
-            'motivo_situacao_cadastral': dados_api.get('descricao_motivo_situacao_cadastral'),
+            'motivo_da_situacao_cadastral': dados_api.get('descricao_motivo_situacao_cadastral'),
             'natureza_juridica': dados_api.get('natureza_juridica'),
             'capital_social': dados_api.get('capital_social'),
             'logradouro': f"{dados_api.get('descricao_tipo_de_logradouro', '')} {dados_api.get('logradouro', '')}".strip(),
@@ -141,55 +142,58 @@ def processar_linha(linha, cnae_processor):
             'cep': dados_api.get('cep'),
             'bairro': dados_api.get('bairro'),
             'municipio': dados_api.get('municipio'),
-            'uf': dados_api.get('uf'),
+            'unidade_federativa': dados_api.get('uf'),
             'email': dados_api.get('email'),
             'telefone_1': dados_api.get('ddd_telefone_1'),
-            'porte': dados_api.get('porte'),
+            'porte_da_empresa': dados_api.get('porte'),
             'matriz_filial': dados_api.get('descricao_identificador_matriz_filial'),
             'situacao_especial': dados_api.get('descricao_situacao_especial'),
             'data_situacao_especial': dados_api.get('data_situacao_especial'),
-            'origem_dados': 'BrasilAPI'
-        })
+            'origem': 'BrasilAPI'
+        }
+        updates.update(api_map)
 
         # Campos derivados
-        linha_atualizada['regiao'] = obter_regiao_por_uf(dados_api.get('uf'))
-        linha_atualizada['regime_tributario'] = 'MEI' if dados_api.get('opcao_pelo_mei') else ('Simples Nacional' if dados_api.get('opcao_pelo_simples') else 'Outros/Normal')
+        updates['regiao'] = obter_regiao_por_uf(dados_api.get('uf'))
+        updates['regime_tributario'] = 'MEI' if dados_api.get('opcao_pelo_mei') else ('Simples Nacional' if dados_api.get('opcao_pelo_simples') else 'Outros/Normal')
 
         # Processamento do CNAE Principal
         cnae_principal = dados_api.get('cnae_fiscal')
         if cnae_principal:
-            linha_atualizada['cnae_fiscal'] = cnae_principal
             cnae_details = cnae_processor.get_cnae_details(cnae_principal)
-            linha_atualizada.update(cnae_details)
+            if cnae_details:
+                cnae_map = {
+                    'secao': cnae_details.get('cnae_secao_denominacao'),
+                    'divisao': cnae_details.get('cnae_divisao_denominacao'),
+                    'grupo': cnae_details.get('cnae_grupo_denominacao'),
+                    'classe': cnae_details.get('cnae_classe_denominacao'),
+                    'subclasse': cnae_details.get('cnae_subclasse_denominacao'),
+                    'codigo_subclasse': cnae_details.get('cnae_subclasse_codigo'),
+                }
+                updates.update(cnae_map)
 
         # Processamento dos CNAEs Secundários
         cnaes_secundarios = dados_api.get('cnaes_secundarios', [])
         if cnaes_secundarios:
             lista_codigos = [item.get('codigo', '') for item in cnaes_secundarios]
-            linha_atualizada['cnaes_secundarios'] = ", ".join([str(c) for c in lista_codigos if c])
+            updates['cnaes_secundarios'] = ", ".join([str(c) for c in lista_codigos if c])
         else:
-            linha_atualizada['cnaes_secundarios'] = ""
-
+            updates['cnaes_secundarios'] = ""
     else:
         print(f"  -> FALHA: {status} para o CNPJ '{cnpj_original}'.")
 
-    return linha_atualizada
+    return updates
 
 def main():
     """Função principal para orquestrar o enriquecimento da planilha."""
     print("--- INICIANDO SCRIPT DE ENRIQUECIMENTO DE CNPJ ---")
     
-    # Carrega a tabela de lookup CNAE
     cnae_processor = CNAEProcessor(ARQUIVO_LOOKUP_CNAE)
     if cnae_processor.df_lookup is None:
-        return # Aborta se o lookup não puder ser carregado
+        return
 
-    # Lê a planilha de entrada
     try:
-        if ARQUIVO_ENTRADA.endswith('.csv'):
-            df = pd.read_csv(ARQUIVO_ENTRADA)
-        else:
-            df = pd.read_excel(ARQUIVO_ENTRADA)
+        df = pd.read_excel(ARQUIVO_ENTRADA)
         print(f"\n[PASSO 1] Arquivo '{ARQUIVO_ENTRADA}' lido com sucesso.")
     except FileNotFoundError:
         print(f"\n[ERRO FATAL] Arquivo de entrada '{ARQUIVO_ENTRADA}' não encontrado.")
@@ -202,21 +206,24 @@ def main():
         print("\n[ERRO FATAL] A coluna 'cnpj' não foi encontrada na planilha.")
         return
 
-    # Processa cada linha
     print(f"\n[PASSO 2] Iniciando consulta à API para {len(df)} CNPJs...")
-    lista_linhas_atualizadas = [processar_linha(linha, cnae_processor) for _, linha in df.iterrows()]
     
-    # Cria o DataFrame final
-    df_enriquecido = pd.DataFrame(lista_linhas_atualizadas)
-    
-    # Reordena colunas para melhor visualização
-    colunas_iniciais = ['cnpj', 'status_consulta', 'razao_social', 'nome_fantasia']
-    cols_ordenadas = colunas_iniciais + [c for c in df_enriquecido.columns if c not in colunas_iniciais]
-    df_enriquecido = df_enriquecido[cols_ordenadas]
+    for index, linha in df.iterrows():
+        # Pega os dados da API
+        updates = processar_linha(linha, cnae_processor)
 
-    # Salva o arquivo de saída
+        # Atualiza apenas os campos vazios na linha original
+        for coluna, valor in updates.items():
+            if coluna in df.columns:
+                # Verifica se o campo está vazio (NaN, None, ou string vazia)
+                if pd.isna(linha[coluna]) or linha[coluna] == '':
+                    df.loc[index, coluna] = valor
+
+        time.sleep(PAUSA_ENTRE_CNPJS)
+    
+    # Salva o DataFrame modificado
     try:
-        df_enriquecido.to_excel(ARQUIVO_SAIDA, index=False, engine='openpyxl')
+        df.to_excel(ARQUIVO_SAIDA, index=False, engine='openpyxl')
         caminho_saida = os.path.join(os.getcwd(), ARQUIVO_SAIDA)
         print(f"\n[PASSO 3] Processamento concluído.")
         print("\n--- SUCESSO FINAL! ---")
